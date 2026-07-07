@@ -134,7 +134,20 @@ async function fetchDaily(ticker) {
   const res = await withRetry(() =>
     yahooFinance.chart(ticker, { interval: '1d', period1: daysAgo(180) }, FETCH_OPTS),
   );
-  return validBars(res.quotes || []);
+  return { bars: validBars(res.quotes || []), meta: res.meta };
+}
+
+// Fraction of today's regular session elapsed (0..1), from chart metadata —
+// exchange- and DST-agnostic. null when the metadata is missing.
+function sessionElapsedFrac(meta) {
+  const reg = meta?.currentTradingPeriod?.regular;
+  if (!reg?.start || !reg?.end) return null;
+  const toSec = (v) => (v instanceof Date ? v.getTime() / 1000 : v);
+  const start = toSec(reg.start);
+  const end = toSec(reg.end);
+  const now = Date.now() / 1000;
+  if (end <= start) return null;
+  return Math.min(1, Math.max(0, (now - start) / (end - start)));
 }
 
 // ---------- core 8-check breakout screen ----------
@@ -196,7 +209,7 @@ async function screenTicker(ticker) {
   const c4h = check4hBreakout(await fetch4h(ticker));
   if (!c4h) return null;
 
-  const d = checkDaily(await fetchDaily(ticker), c4h.cur.close);
+  const d = checkDaily((await fetchDaily(ticker)).bars, c4h.cur.close);
   if (!d) return null;
 
   // 6. Market cap ≥ $50M
@@ -266,7 +279,7 @@ app.post('/api/chart', async (req, res) => {
 // Shared base: ADR(20) > 5%, then holding/reclaiming the 10/20/50 EMA inside a
 // consolidation base, then final filters P/E < 20, volume > 2× 20d avg, RSI > 50.
 
-function dailyStats(daily, liveSession = null) {
+function dailyStats(daily, liveSession = null, elapsedFrac = null) {
   if (daily.length < 55) return null;
   const closes = daily.map((b) => b.close);
   const last = daily[daily.length - 1];
@@ -277,17 +290,32 @@ function dailyStats(daily, liveSession = null) {
   const ema50 = ema(closes.slice(-60), 50);
   const rsi = rsi14(closes.slice(-60));
 
-  // Volume spike and prev-day change must use the most recent COMPLETED
-  // session — mid-session the last bar's volume is partial and a 2× ratio is
-  // unreachable. liveSession comes from quote.marketState; fall back to a
+  // liveSession comes from quote.marketState; fall back to a
   // same-calendar-day heuristic when the quote is unavailable.
   const today = new Date().toISOString().slice(0, 10);
   const live =
     liveSession != null ? liveSession : new Date(last.date).toISOString().slice(0, 10) === today;
-  const i = daily.length - (live ? 2 : 1);
+  const lastIdx = daily.length - 1;
+  const i = live ? lastIdx - 1 : lastIdx; // most recent COMPLETED session
   if (i < 21) return null;
-  const avgVol20 = sma(daily.slice(i - 20, i).map((b) => b.volume));
-  const volRatio = avgVol20 > 0 ? daily[i].volume / avgVol20 : 0;
+
+  // Volume spike: mid-session, pace today's partial volume against the
+  // expected volume at this point in the session (avg of the last 20 completed
+  // sessions × elapsed fraction). The 10% floor keeps the open from producing
+  // noise ratios. When the market is closed (or session metadata is missing),
+  // use the completed session's full-day ratio.
+  let volRatio, volMode;
+  if (live && elapsedFrac != null && elapsedFrac > 0) {
+    const base = sma(daily.slice(i - 19, i + 1).map((b) => b.volume));
+    volRatio = base > 0 ? last.volume / (base * Math.max(elapsedFrac, 0.1)) : 0;
+    volMode = 'paced';
+  } else {
+    const base = sma(daily.slice(i - 20, i).map((b) => b.volume));
+    volRatio = base > 0 ? daily[i].volume / base : 0;
+    volMode = 'eod';
+  }
+
+  // Prev-day change always compares completed sessions.
   const prevDayPct = ((daily[i].close - daily[i - 1].close) / daily[i - 1].close) * 100;
 
   // Consolidation base: last 10 closes trade in a ≤15% band
@@ -298,7 +326,7 @@ function dailyStats(daily, liveSession = null) {
   const monthAgo = closes[Math.max(0, closes.length - 22)];
   const monthPct = ((last.close - monthAgo) / monthAgo) * 100;
 
-  return { close: last.close, adr, ema10, ema20, ema50, rsi, volRatio, basePct, prevDayPct, monthPct };
+  return { close: last.close, adr, ema10, ema20, ema50, rsi, volRatio, volMode, basePct, prevDayPct, monthPct };
 }
 
 function holdingMAs(s) {
@@ -307,11 +335,12 @@ function holdingMAs(s) {
 }
 
 async function momentumRow(ticker) {
-  const [daily, quote] = await Promise.all([
+  const [{ bars: daily, meta }, quote] = await Promise.all([
     fetchDaily(ticker),
     withRetry(() => yahooFinance.quote(ticker, {}, FETCH_OPTS)).catch(() => null),
   ]);
-  const s = dailyStats(daily, quote ? quote.marketState === 'REGULAR' : null);
+  const live = quote ? quote.marketState === 'REGULAR' : null;
+  const s = dailyStats(daily, live, live ? sessionElapsedFrac(meta) : null);
   if (!s || s.adr <= 5) return null;
 
   const pe = quote?.trailingPE ?? null;
@@ -338,6 +367,7 @@ const rowOut = (r, metricName, metricValue) => ({
   price: round2(r.s.close),
   pe: round2(r.pe),
   volRatio: round2(r.s.volRatio),
+  volMode: r.s.volMode,
   rsi: round2(r.s.rsi),
   adr: round2(r.s.adr),
   [metricName]: round2(metricValue),
@@ -406,4 +436,4 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   app.listen(PORT, () => console.log(`Breakout scanner API on http://localhost:${PORT}`));
 }
 
-export { finalFilter, dailyStats, aggregate4h, check4hBreakout };
+export { finalFilter, dailyStats, aggregate4h, check4hBreakout, sessionElapsedFrac, momentumRow };

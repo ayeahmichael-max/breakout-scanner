@@ -56,7 +56,7 @@ Cost ordering: 1h data is fetched first and checks 1–4 run before any daily/qu
 
 ADR = mean of (high−low)/low over 20 daily candles × 100. All three scanners then shortlist tickers **holding/reclaiming the 10/20/50 EMA inside a consolidation base** (close ≥ EMA50, close ≥ 0.97×EMA20, 10-day close range ≤ 15%) and apply the final filters: **P/E < 20 (or null when `relaxPE`), volume > 2× 20-day avg, RSI(14) > 50**. Output ranked: ticker, price, P/E, volume ratio, RSI + scanner metric.
 
-**Volume spike + prev-day change use the most recent COMPLETED session** (`dailyStats` skips the live daily bar when `quote.marketState === 'REGULAR'`, date-heuristic fallback when the quote is missing). Mid-session partial volume can never reach 2× a full-day average — this was a real bug found via filter-funnel analysis (0/50 leaders passed the volume filter before the fix).
+**Volume spike is session-aware** (`dailyStats`): during a live session (`quote.marketState === 'REGULAR'`) it uses **intraday pacing** — today's cumulative volume ÷ (20-day avg × fraction of the session elapsed), with the fraction floored at 0.1 so the open doesn't produce noise ratios. Session start/end come from `chart().meta.currentTradingPeriod.regular` (exchange/DST-agnostic, `sessionElapsedFrac`). When the market is closed or metadata is missing, it falls back to the last COMPLETED session's full-day ratio (mid-session partial volume can never reach 2× a full-day average — original bug found via filter-funnel analysis). Rows carry `volMode: 'paced' | 'eod'`; the UI marks paced ratios with ⚡. Prev-day change always compares completed sessions.
 
 - **Pre-Market** (US-only): Yahoo `quote()` preMarketPrice gap ≥ 4% vs prev close
 - **Potent**: previous day's % change ranking (top 30 by 1-day gain)
@@ -73,7 +73,7 @@ ADR = mean of (high−low)/low over 20 daily candles × 100. All three scanners 
 - Concurrency pool of 8 parallel Yahoo requests; do not raise aggressively — Yahoo rate-limits/blocks hot IPs.
 - Responses cached in-memory for 3 min (keyed endpoint+market) so the 5-min UI auto-refresh doesn't hammer Yahoo.
 - `/api/scan` accepts optional `{ tickers: [...] }` override for fast testing with a small universe.
-- `server.js` only calls `app.listen` when run directly; it exports `finalFilter`, `dailyStats`, `aggregate4h`, `check4hBreakout` so logic can be unit-tested via `import('./server.js')`.
+- `server.js` only calls `app.listen` when run directly; it exports `finalFilter`, `dailyStats`, `aggregate4h`, `check4hBreakout`, `sessionElapsedFrac`, `momentumRow` so logic can be unit-tested via `import('./server.js')`.
 - lightweight-charts is **v5**: `chart.addSeries(CandlestickSeries, opts)`, not v4's `addCandlestickSeries()`. Breakout candle is highlighted via per-bar `color` fields; the consolidation band is an absolutely-positioned div synced with `series.priceToCoordinate()`.
 
 ## Frontend styling (dark)

@@ -106,7 +106,7 @@ export default function App() {
       ['Ticker', (r) => r.ticker],
       ['Price', (r) => fmt(r.price)],
       ['P/E', (r) => fmt(r.pe)],
-      ['Volume Ratio', (r) => fmt(r.volRatio, '×')],
+      ['Volume Ratio', (r) => `${fmt(r.volRatio, '×')}${r.volMode === 'paced' ? ' ⚡' : ''}`],
       ['RSI', (r) => fmt(r.rsi)],
       ['ADR %', (r) => fmt(r.adr, '%')],
       [tabDef.metricLabel, (r) => fmt(r[tabDef.metric], '%')],
@@ -203,6 +203,12 @@ export default function App() {
         {tab === 'premarket' && (
           <div className="mb-4 text-xs text-slate-500">
             US market only — pre-market quotes populate roughly 4:00–9:30 AM ET.
+          </div>
+        )}
+        {isMomentum && (
+          <div className="mb-4 text-xs text-slate-500">
+            ⚡ = intraday pacing: today&apos;s volume vs. the expected volume at this point in the
+            session. Without ⚡, the ratio is the last completed session vs. its 20-day average.
           </div>
         )}
 
