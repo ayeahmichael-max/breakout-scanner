@@ -1,0 +1,15 @@
+{
+  "name": "breakout-scanner-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "yahoo-finance2": "2.13.3"
+  }
+}
