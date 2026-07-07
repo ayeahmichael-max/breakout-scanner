@@ -4,6 +4,10 @@ A full-stack stock screener that hunts for **4-hour consolidation breakouts** ac
 
 > **For educational and research purposes only. Not financial advice.**
 
+![Breakout Scanner UI](docs/screenshot.png)
+
+*UI preview with sample table rows (`?demo=1`); the 4h chart, consolidation band, and breakout-candle highlight are live data.*
+
 ## Features
 
 - **Breakout screen (UK 🇬🇧 / USA 🇺🇸)** — 8 checks on the most recently completed 4h candle: tight consolidation, 2%+ range break, 5%+ candle body, 1.5×+ relative volume, liquidity, market cap, proximity to highs, and trend alignment. Top 50 ranked by relative volume.
@@ -30,7 +34,7 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:5173, pick a tab, hit **Scan Now**.
+Open http://localhost:5173, pick a tab, hit **Scan Now**. Add `?demo=1` to the URL to pre-fill the USA tab with sample rows (useful for UI work when the market isn't cooperating).
 
 ## API
 

@@ -78,6 +78,15 @@ export default function App() {
     }
   }, [tab, subMarket, relaxPE, dataKey]);
 
+  // ?demo=1 pre-fills the USA tab with sample rows (screenshots/UI previews)
+  useEffect(() => {
+    if (!new URLSearchParams(window.location.search).has('demo')) return;
+    import('./demoData.js').then(({ DEMO_SCAN }) => {
+      setData((d) => ({ ...d, usa: DEMO_SCAN }));
+      setSelected((s) => ({ ...s, usa: DEMO_SCAN.results[0].ticker }));
+    });
+  }, []);
+
   // 5-minute auto-refresh of the active tab (backend caches for 3 min, so this is Yahoo-safe)
   useEffect(() => {
     if (!autoRefresh) return;
