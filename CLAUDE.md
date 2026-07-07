@@ -31,9 +31,11 @@ frontend/
 |----------|------|---------|
 | `/api/scan` | `{ market: 'uk' \| 'usa' }` | Top 50 tickers passing all 8 breakout checks, sorted by relative volume desc |
 | `/api/chart` | `{ ticker }` | 4h candle array + `consolidationHigh/Low` + breakout candle time |
-| `/api/premarket` | `{}` (US-only) | Gappers: preMarket gap ≥ 4%, ADR > 5%, ranked shortlist |
-| `/api/potent` | `{ market }` | Previous day's top % gainers with ADR > 5%, ranked shortlist |
-| `/api/leaders` | `{ market }` | 1-month performance ranking + breadth count (market-health signal) |
+| `/api/premarket` | `{ relaxPE? }` (US-only) | Gappers: preMarket gap ≥ 4%, ADR > 5%, ranked shortlist |
+| `/api/potent` | `{ market, relaxPE? }` | Previous day's top % gainers with ADR > 5%, ranked shortlist |
+| `/api/leaders` | `{ market, relaxPE? }` | 1-month performance ranking + breadth count (market-health signal) |
+
+`relaxPE: true` ("Include no-P/E stocks" toggle in the UI) lets stocks with no earnings (null P/E) through the momentum filters; a real P/E ≥ 20 still fails. Off by default (strict spec behavior).
 
 ## Screening logic — core 8 checks (on the most recent COMPLETED 4h candle)
 
@@ -52,7 +54,9 @@ Cost ordering: 1h data is fetched first and checks 1–4 run before any daily/qu
 
 ## Extra scanners (shared base: ADR20 > 5%)
 
-ADR = mean of (high−low)/low over 20 daily candles × 100. All three scanners then shortlist tickers **holding/reclaiming the 10/20/50 EMA inside a consolidation base** (close ≥ EMA50, close ≥ 0.97×EMA20, 10-day close range ≤ 15%) and apply the final filters: **P/E < 20, volume > 2× 20-day avg, RSI(14) > 50**. Output ranked: ticker, price, P/E, volume ratio, RSI + scanner metric.
+ADR = mean of (high−low)/low over 20 daily candles × 100. All three scanners then shortlist tickers **holding/reclaiming the 10/20/50 EMA inside a consolidation base** (close ≥ EMA50, close ≥ 0.97×EMA20, 10-day close range ≤ 15%) and apply the final filters: **P/E < 20 (or null when `relaxPE`), volume > 2× 20-day avg, RSI(14) > 50**. Output ranked: ticker, price, P/E, volume ratio, RSI + scanner metric.
+
+**Volume spike + prev-day change use the most recent COMPLETED session** (`dailyStats` skips the live daily bar when `quote.marketState === 'REGULAR'`, date-heuristic fallback when the quote is missing). Mid-session partial volume can never reach 2× a full-day average — this was a real bug found via filter-funnel analysis (0/50 leaders passed the volume filter before the fix).
 
 - **Pre-Market** (US-only): Yahoo `quote()` preMarketPrice gap ≥ 4% vs prev close
 - **Potent**: previous day's % change ranking (top 30 by 1-day gain)
@@ -69,6 +73,7 @@ ADR = mean of (high−low)/low over 20 daily candles × 100. All three scanners 
 - Concurrency pool of 8 parallel Yahoo requests; do not raise aggressively — Yahoo rate-limits/blocks hot IPs.
 - Responses cached in-memory for 3 min (keyed endpoint+market) so the 5-min UI auto-refresh doesn't hammer Yahoo.
 - `/api/scan` accepts optional `{ tickers: [...] }` override for fast testing with a small universe.
+- `server.js` only calls `app.listen` when run directly; it exports `finalFilter`, `dailyStats`, `aggregate4h`, `check4hBreakout` so logic can be unit-tested via `import('./server.js')`.
 - lightweight-charts is **v5**: `chart.addSeries(CandlestickSeries, opts)`, not v4's `addCandlestickSeries()`. Breakout candle is highlighted via per-bar `color` fields; the consolidation band is an absolutely-positioned div synced with `series.priceToCoordinate()`.
 
 ## Frontend styling (dark)

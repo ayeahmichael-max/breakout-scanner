@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import { pathToFileURL } from 'url';
 import yahooFinance from 'yahoo-finance2';
 import { UK_TICKERS, USA_TICKERS } from './tickers.js';
 
@@ -265,7 +266,7 @@ app.post('/api/chart', async (req, res) => {
 // Shared base: ADR(20) > 5%, then holding/reclaiming the 10/20/50 EMA inside a
 // consolidation base, then final filters P/E < 20, volume > 2× 20d avg, RSI > 50.
 
-function dailyStats(daily) {
+function dailyStats(daily, liveSession = null) {
   if (daily.length < 55) return null;
   const closes = daily.map((b) => b.close);
   const last = daily[daily.length - 1];
@@ -275,18 +276,23 @@ function dailyStats(daily) {
   const ema20 = ema(closes.slice(-60), 20);
   const ema50 = ema(closes.slice(-60), 50);
   const rsi = rsi14(closes.slice(-60));
-  const avgVol20 = sma(daily.slice(-21, -1).map((b) => b.volume));
-  const volRatio = avgVol20 > 0 ? last.volume / avgVol20 : 0;
+
+  // Volume spike and prev-day change must use the most recent COMPLETED
+  // session — mid-session the last bar's volume is partial and a 2× ratio is
+  // unreachable. liveSession comes from quote.marketState; fall back to a
+  // same-calendar-day heuristic when the quote is unavailable.
+  const today = new Date().toISOString().slice(0, 10);
+  const live =
+    liveSession != null ? liveSession : new Date(last.date).toISOString().slice(0, 10) === today;
+  const i = daily.length - (live ? 2 : 1);
+  if (i < 21) return null;
+  const avgVol20 = sma(daily.slice(i - 20, i).map((b) => b.volume));
+  const volRatio = avgVol20 > 0 ? daily[i].volume / avgVol20 : 0;
+  const prevDayPct = ((daily[i].close - daily[i - 1].close) / daily[i - 1].close) * 100;
 
   // Consolidation base: last 10 closes trade in a ≤15% band
   const base10 = closes.slice(-10);
   const basePct = ((Math.max(...base10) - Math.min(...base10)) / Math.min(...base10)) * 100;
-
-  // Previous completed session's % change (skip today's live bar if present)
-  const today = new Date().toISOString().slice(0, 10);
-  const lastIsToday = new Date(last.date).toISOString().slice(0, 10) === today;
-  const i = daily.length - (lastIsToday ? 2 : 1);
-  const prevDayPct = i >= 1 ? ((daily[i].close - daily[i - 1].close) / daily[i - 1].close) * 100 : 0;
 
   // 1-month performance (~21 trading days)
   const monthAgo = closes[Math.max(0, closes.length - 22)];
@@ -305,7 +311,7 @@ async function momentumRow(ticker) {
     fetchDaily(ticker),
     withRetry(() => yahooFinance.quote(ticker, {}, FETCH_OPTS)).catch(() => null),
   ]);
-  const s = dailyStats(daily);
+  const s = dailyStats(daily, quote ? quote.marketState === 'REGULAR' : null);
   if (!s || s.adr <= 5) return null;
 
   const pe = quote?.trailingPE ?? null;
@@ -317,10 +323,14 @@ async function momentumRow(ticker) {
   return { ticker, s, pe, gapPct };
 }
 
-function finalFilter(rows) {
-  return rows.filter(
-    (r) => r.pe != null && r.pe > 0 && r.pe < 20 && r.s.volRatio > 2 && r.s.rsi != null && r.s.rsi > 50 && holdingMAs(r.s),
-  );
+// relaxPE: stocks with no earnings (null P/E) pass; a real P/E ≥ 20 still fails.
+function finalFilter(rows, relaxPE = false) {
+  return rows.filter((r) => {
+    const peOk = relaxPE
+      ? r.pe == null || (r.pe > 0 && r.pe < 20)
+      : r.pe != null && r.pe > 0 && r.pe < 20;
+    return peOk && r.s.volRatio > 2 && r.s.rsi != null && r.s.rsi > 50 && holdingMAs(r.s);
+  });
 }
 
 const rowOut = (r, metricName, metricValue) => ({
@@ -338,14 +348,15 @@ async function scanMomentum(universe) {
 }
 
 // Pre-Market (US-only): gapping ≥ 4% pre-market on high-ADR names
-app.post('/api/premarket', async (_req, res) => {
+app.post('/api/premarket', async (req, res) => {
+  const relaxPE = !!req.body?.relaxPE;
   try {
-    const data = await cached('premarket', async () => {
+    const data = await cached(`premarket:${relaxPE}`, async () => {
       const rows = (await scanMomentum(USA_TICKERS)).filter((r) => r.gapPct != null && r.gapPct >= 4);
-      const passed = finalFilter(rows)
+      const passed = finalFilter(rows, relaxPE)
         .sort((a, b) => b.gapPct - a.gapPct)
         .map((r) => rowOut(r, 'gapPct', r.gapPct));
-      return { results: passed, candidates: rows.length, scannedAt: new Date().toISOString() };
+      return { results: passed, candidates: rows.length, relaxPE, scannedAt: new Date().toISOString() };
     });
     res.json(data);
   } catch (e) {
@@ -356,12 +367,13 @@ app.post('/api/premarket', async (_req, res) => {
 // Potent: previous session's strongest performers (sector rotation / theme momentum)
 app.post('/api/potent', async (req, res) => {
   const market = req.body?.market === 'uk' ? 'uk' : 'usa';
+  const relaxPE = !!req.body?.relaxPE;
   try {
-    const data = await cached(`potent:${market}`, async () => {
+    const data = await cached(`potent:${market}:${relaxPE}`, async () => {
       const rows = await scanMomentum(market === 'uk' ? UK_TICKERS : USA_TICKERS);
       const top = rows.sort((a, b) => b.s.prevDayPct - a.s.prevDayPct).slice(0, 30);
-      const passed = finalFilter(top).map((r) => rowOut(r, 'prevDayPct', r.s.prevDayPct));
-      return { market, results: passed, candidates: top.length, scannedAt: new Date().toISOString() };
+      const passed = finalFilter(top, relaxPE).map((r) => rowOut(r, 'prevDayPct', r.s.prevDayPct));
+      return { market, results: passed, candidates: top.length, relaxPE, scannedAt: new Date().toISOString() };
     });
     res.json(data);
   } catch (e) {
@@ -372,13 +384,14 @@ app.post('/api/potent', async (req, res) => {
 // Leader: monthly performance ranking; breadth = market-health signal
 app.post('/api/leaders', async (req, res) => {
   const market = req.body?.market === 'uk' ? 'uk' : 'usa';
+  const relaxPE = !!req.body?.relaxPE;
   try {
-    const data = await cached(`leaders:${market}`, async () => {
+    const data = await cached(`leaders:${market}:${relaxPE}`, async () => {
       const rows = await scanMomentum(market === 'uk' ? UK_TICKERS : USA_TICKERS);
       const ranked = rows.sort((a, b) => b.s.monthPct - a.s.monthPct);
       const breadth = ranked.filter((r) => r.s.monthPct > 20).length;
-      const passed = finalFilter(ranked.slice(0, 50)).map((r) => rowOut(r, 'monthPct', r.s.monthPct));
-      return { market, results: passed, breadth, candidates: rows.length, scannedAt: new Date().toISOString() };
+      const passed = finalFilter(ranked.slice(0, 50), relaxPE).map((r) => rowOut(r, 'monthPct', r.s.monthPct));
+      return { market, results: passed, breadth, candidates: rows.length, relaxPE, scannedAt: new Date().toISOString() };
     });
     res.json(data);
   } catch (e) {
@@ -388,4 +401,9 @@ app.post('/api/leaders', async (req, res) => {
 
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
 
-app.listen(PORT, () => console.log(`Breakout scanner API on http://localhost:${PORT}`));
+// Only listen when run directly (node server.js) — keeps the module importable for tests.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  app.listen(PORT, () => console.log(`Breakout scanner API on http://localhost:${PORT}`));
+}
+
+export { finalFilter, dailyStats, aggregate4h, check4hBreakout };

@@ -9,18 +9,18 @@ const TABS = [
   { key: 'leaders', label: 'Leaders 🏆', kind: 'momentum', metric: 'monthPct', metricLabel: '1-Mo %' },
 ];
 
-function endpointFor(tabKey, market) {
+function endpointFor(tabKey, market, relaxPE) {
   switch (tabKey) {
     case 'uk':
       return ['/api/scan', { market: 'uk' }];
     case 'usa':
       return ['/api/scan', { market: 'usa' }];
     case 'premarket':
-      return ['/api/premarket', {}];
+      return ['/api/premarket', { relaxPE }];
     case 'potent':
-      return ['/api/potent', { market }];
+      return ['/api/potent', { market, relaxPE }];
     case 'leaders':
-      return ['/api/leaders', { market }];
+      return ['/api/leaders', { market, relaxPE }];
     default:
       return null;
   }
@@ -45,15 +45,18 @@ export default function App() {
   const [scanError, setScanError] = useState(null);
   const [selected, setSelected] = useState({}); // per data-key chart ticker
   const [autoRefresh, setAutoRefresh] = useState(false);
+  const [relaxPE, setRelaxPE] = useState(false); // momentum tabs: also allow stocks with no P/E
 
   const tabDef = TABS.find((t) => t.key === tab);
   const needsSubMarket = tab === 'potent' || tab === 'leaders';
-  const dataKey = needsSubMarket ? `${tab}:${subMarket}` : tab;
+  const isMomentum = tabDef.kind === 'momentum';
+  let dataKey = needsSubMarket ? `${tab}:${subMarket}` : tab;
+  if (isMomentum) dataKey += relaxPE ? ':anype' : ':strict';
   const current = data[dataKey];
   const results = current?.results ?? null;
 
   const scan = useCallback(async () => {
-    const [url, body] = endpointFor(tab, subMarket);
+    const [url, body] = endpointFor(tab, subMarket, relaxPE);
     setLoading(true);
     setScanError(null);
     try {
@@ -73,7 +76,7 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, [tab, subMarket, dataKey]);
+  }, [tab, subMarket, relaxPE, dataKey]);
 
   // 5-minute auto-refresh of the active tab (backend caches for 3 min, so this is Yahoo-safe)
   useEffect(() => {
@@ -153,19 +156,32 @@ export default function App() {
               {t.label}
             </button>
           ))}
-          {needsSubMarket && (
-            <div className="ml-auto flex items-center gap-1 rounded-full bg-slate-800 p-1">
-              {['usa', 'uk'].map((m) => (
-                <button
-                  key={m}
-                  onClick={() => setSubMarket(m)}
-                  className={`rounded-full px-3 py-1 text-xs font-medium ${
-                    subMarket === m ? 'bg-emerald-500 text-white' : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  {m.toUpperCase()}
-                </button>
-              ))}
+          {isMomentum && (
+            <div className="ml-auto flex items-center gap-3">
+              <label className="flex cursor-pointer items-center gap-2 text-xs text-slate-400">
+                <input
+                  type="checkbox"
+                  checked={relaxPE}
+                  onChange={(e) => setRelaxPE(e.target.checked)}
+                  className="accent-emerald-500"
+                />
+                Include no-P/E stocks
+              </label>
+              {needsSubMarket && (
+                <div className="flex items-center gap-1 rounded-full bg-slate-800 p-1">
+                  {['usa', 'uk'].map((m) => (
+                    <button
+                      key={m}
+                      onClick={() => setSubMarket(m)}
+                      className={`rounded-full px-3 py-1 text-xs font-medium ${
+                        subMarket === m ? 'bg-emerald-500 text-white' : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      {m.toUpperCase()}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </nav>
@@ -225,7 +241,9 @@ export default function App() {
                     {results
                       ? tabDef.kind === 'breakout'
                         ? 'No breakouts found — try scanning again.'
-                        : 'No matches — filters (P/E < 20, 2× volume, RSI > 50, ADR > 5%) are strict.'
+                        : relaxPE
+                          ? 'No matches — filters (P/E < 20 or N/A, 2× volume, RSI > 50, ADR > 5%) are strict.'
+                          : 'No matches — try "Include no-P/E stocks"; most high-ADR momentum names have no earnings yet.'
                       : 'Hit Scan Now to run this scanner.'}
                   </td>
                 </tr>
